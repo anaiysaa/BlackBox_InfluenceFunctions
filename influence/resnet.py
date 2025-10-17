@@ -1,140 +1,195 @@
+from __future__ import division
+from __future__ import print_function
+from __future__ import absolute_import
+from __future__ import unicode_literals  
+
+import abc
+import sys
+
+import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, Model
-import tensorflow.keras.backend as K
+import math
+#adapted file given from TA to older tesnerflow version to avoid keras
+from influence.genericNeuralNet import GenericNeuralNet, variable, variable_with_weight_decay
+from influence.dataset import DataSet
 
-def _weights_init(shape, dtype=None):
-    # Kaiming He initialization
-    fan_in = shape[0] * shape[1] * shape[2] if len(shape) == 3 else shape[0]
-    stddev = tf.sqrt(2. / fan_in)
-    return tf.random.normal(shape, stddev=stddev, dtype=dtype)
 
-class LambdaLayer(layers.Layer):
-    def __init__(self, lambd):
-        super(LambdaLayer, self).__init__()
-        self.lambd = lambd
+def conv2d(x, W, stride):
+    return tf.nn.conv2d(x, W, strides=[1, stride, stride, 1], padding='SAME')
 
-    def call(self, x):
-        return self.lambd(x)
 
-class BasicBlock(layers.Layer):
-    expansion = 1
+class ResNet20(GenericNeuralNet):
+    """ResNet-20 for CIFAR-10 following the influence library pattern."""
 
-    def __init__(self, in_planes, planes, stride=1, option='B'):
-        super(BasicBlock, self).__init__()
-        self.conv1 = layers.Conv2D(planes, kernel_size=3, strides=stride, 
-                                  padding='same', use_bias=False,
-                                  kernel_initializer=_weights_init)
-        self.bn1 = layers.BatchNormalization()
+    def __init__(self, input_side, input_channels, conv_patch_size, hidden1_units, 
+                 hidden2_units, hidden3_units, weight_decay, num_classes, batch_size,
+                 data_sets, initial_learning_rate, damping, decay_epochs, mini_batch,
+                 train_dir, log_dir, model_name, **kwargs):
         
-        self.conv2 = layers.Conv2D(planes, kernel_size=3, strides=1,
-                                  padding='same', use_bias=False,
-                                  kernel_initializer=_weights_init)
-        self.bn2 = layers.BatchNormalization()
+        self.weight_decay = weight_decay
+        self.input_side = input_side
+        self.input_channels = input_channels
+        self.input_dim = self.input_side * self.input_side * self.input_channels
+        self.conv_patch_size = conv_patch_size
+        # For ResNet, these represent the channel dimensions
+        self.hidden1_units = hidden1_units  # 16 channels
+        self.hidden2_units = hidden2_units  # 32 channels
+        self.hidden3_units = hidden3_units  # 64 channels
 
-        self.shortcut = tf.keras.Sequential()
-        if stride != 1 or in_planes != planes:
-            if option == 'A':
-                self.shortcut = LambdaLayer(lambda x: 
-                    tf.pad(x[:, :, ::2, ::2] if K.image_data_format() == 'channels_first' 
-                          else x[:, ::2, ::2, :], 
-                    [[0, 0], 
-                     [planes//4, planes//4] if K.image_data_format() == 'channels_first' else [0, 0],
-                     [0, 0], 
-                     [0, 0] if K.image_data_format() == 'channels_first' else [planes//4, planes//4]]))
-            elif option == 'B':
-                self.shortcut = tf.keras.Sequential([
-                    layers.Conv2D(self.expansion * planes, kernel_size=1, 
-                                 strides=stride, use_bias=False,
-                                 kernel_initializer=_weights_init),
-                    layers.BatchNormalization()
-                ])
+        super(ResNet20, self).__init__(
+            input_dim=self.input_dim,
+            weight_decay=weight_decay,
+            num_classes=num_classes,
+            batch_size=batch_size,
+            data_sets=data_sets,
+            initial_learning_rate=initial_learning_rate,
+            damping=damping,
+            decay_epochs=decay_epochs,
+            mini_batch=mini_batch,
+            train_dir=train_dir,
+            log_dir=log_dir,
+            model_name=model_name,
+            **kwargs
+        )
 
-    def call(self, x, training=False):
-        out = tf.nn.relu(self.bn1(self.conv1(x), training=training))
-        out = self.bn2(self.conv2(out), training=training)
+    def batch_norm(self, x, name):
+        """Batch normalization layer."""
+        with tf.variable_scope(name):
+            return tf.contrib.layers.batch_norm(
+                x, 
+                decay=0.9,
+                epsilon=1e-5,
+                center=True,
+                scale=True,
+                is_training=True,
+                scope='bn'
+            )
+
+    def residual_block(self, x, in_channels, out_channels, stride, block_name):
+        """Basic residual block."""
+        with tf.variable_scope(block_name):
+            # First convolution
+            with tf.variable_scope('conv1'):
+                W1 = variable_with_weight_decay(
+                    'weights',
+                    [3, 3, in_channels, out_channels],
+                    stddev=math.sqrt(2.0 / (3 * 3 * in_channels)),
+                    wd=self.weight_decay
+                )
+                conv1 = conv2d(x, W1, stride)
+                bn1 = self.batch_norm(conv1, 'bn1')
+                relu1 = tf.nn.relu(bn1)
+
+            # Second convolution
+            with tf.variable_scope('conv2'):
+                W2 = variable_with_weight_decay(
+                    'weights',
+                    [3, 3, out_channels, out_channels],
+                    stddev=math.sqrt(2.0 / (3 * 3 * out_channels)),
+                    wd=self.weight_decay
+                )
+                conv2 = conv2d(relu1, W2, 1)
+                bn2 = self.batch_norm(conv2, 'bn2')
+
+            # Shortcut connection
+            if stride != 1 or in_channels != out_channels:
+                with tf.variable_scope('shortcut'):
+                    W_shortcut = variable_with_weight_decay(
+                        'weights',
+                        [1, 1, in_channels, out_channels],
+                        stddev=math.sqrt(2.0 / in_channels),
+                        wd=self.weight_decay
+                    )
+                    shortcut = conv2d(x, W_shortcut, stride)
+                    shortcut = self.batch_norm(shortcut, 'bn_shortcut')
+            else:
+                shortcut = x
+
+            # Add and activate
+            output = tf.nn.relu(bn2 + shortcut)
+            return output
+
+    def get_all_params(self):
+        """Get all trainable parameters."""
+        all_params = []
+        for var in tf.trainable_variables():
+            if 'weights' in var.name or 'biases' in var.name:
+                all_params.append(var)
+        return all_params
+
+    def retrain(self, num_steps, feed_dict):        
+        """Retrain the model."""
+        retrain_dataset = DataSet(feed_dict[self.input_placeholder], feed_dict[self.labels_placeholder])
+
+        for step in xrange(num_steps):   
+            iter_feed_dict = self.fill_feed_dict_with_batch(retrain_dataset)
+            self.sess.run(self.train_op, feed_dict=iter_feed_dict)
+
+    def placeholder_inputs(self):
+        """Create placeholder inputs."""
+        input_placeholder = tf.placeholder(
+            tf.float32, 
+            shape=(None, self.input_dim),
+            name='input_placeholder')
+        labels_placeholder = tf.placeholder(
+            tf.int32,             
+            shape=(None),
+            name='labels_placeholder')
+        return input_placeholder, labels_placeholder
+
+    def inference(self, input_x):        
+        """Build the ResNet-20 model."""
         
-        shortcut_out = self.shortcut(x, training=training) if hasattr(self.shortcut, '__call__') else self.shortcut(x)
-        out = out + shortcut_out
-        out = tf.nn.relu(out)
-        return out
-
-class ResNet(Model):
-    def __init__(self, block, num_blocks, num_classes=10):
-        super(ResNet, self).__init__()
-        self.in_planes = 16
-
-        self.conv1 = layers.Conv2D(16, kernel_size=3, strides=1, 
-                                  padding='same', use_bias=False,
-                                  kernel_initializer=_weights_init)
-        self.bn1 = layers.BatchNormalization()
+        input_reshaped = tf.reshape(input_x, [-1, self.input_side, self.input_side, self.input_channels])
         
-        self.layer1 = self._make_layer(block, 16, num_blocks[0], stride=1)
-        self.layer2 = self._make_layer(block, 32, num_blocks[1], stride=2)
-        self.layer3 = self._make_layer(block, 64, num_blocks[2], stride=2)
-        
-        self.avg_pool = layers.GlobalAveragePooling2D()
-        self.linear = layers.Dense(num_classes, kernel_initializer=_weights_init)
+        # Initial convolution
+        with tf.variable_scope('conv1'):
+            W_conv1 = variable_with_weight_decay(
+                'weights',
+                [3, 3, self.input_channels, 16],
+                stddev=math.sqrt(2.0 / (3 * 3 * self.input_channels)),
+                wd=self.weight_decay
+            )
+            conv1 = conv2d(input_reshaped, W_conv1, 1)
+            bn1 = self.batch_norm(conv1, 'bn1')
+            relu1 = tf.nn.relu(bn1)
 
-    def _make_layer(self, block, planes, num_blocks, stride):
-        strides = [stride] + [1] * (num_blocks - 1)
-        layers_list = []
-        for stride in strides:
-            layers_list.append(block(self.in_planes, planes, stride))
-            self.in_planes = planes * block.expansion
-        return tf.keras.Sequential(layers_list)
+        # Stack 1: 3 blocks with 16 filters
+        block1_1 = self.residual_block(relu1, 16, 16, 1, 'block1_1')
+        block1_2 = self.residual_block(block1_1, 16, 16, 1, 'block1_2')
+        block1_3 = self.residual_block(block1_2, 16, 16, 1, 'block1_3')
 
-    def call(self, x, training=False):
-        out = tf.nn.relu(self.bn1(self.conv1(x), training=training))
-        out = self.layer1(out, training=training)
-        out = self.layer2(out, training=training)
-        out = self.layer3(out, training=training)
-        out = self.avg_pool(out)
-        out = self.linear(out)
-        return out
+        # Stack 2: 3 blocks with 32 filters (downsample)
+        block2_1 = self.residual_block(block1_3, 16, 32, 2, 'block2_1')
+        block2_2 = self.residual_block(block2_1, 32, 32, 1, 'block2_2')
+        block2_3 = self.residual_block(block2_2, 32, 32, 1, 'block2_3')
 
-# Model definitions
-def resnet20():
-    return ResNet(BasicBlock, [3, 3, 3])
+        # Stack 3: 3 blocks with 64 filters (downsample)
+        block3_1 = self.residual_block(block2_3, 32, 64, 2, 'block3_1')
+        block3_2 = self.residual_block(block3_1, 64, 64, 1, 'block3_2')
+        block3_3 = self.residual_block(block3_2, 64, 64, 1, 'block3_3')
 
-def resnet32():
-    return ResNet(BasicBlock, [5, 5, 5])
+        # Global average pooling
+        gap = tf.reduce_mean(block3_3, axis=[1, 2])
 
-def resnet44():
-    return ResNet(BasicBlock, [7, 7, 7])
+        # Fully connected layer
+        with tf.variable_scope('fc'):
+            W_fc = variable_with_weight_decay(
+                'weights',
+                [64, self.num_classes],
+                stddev=math.sqrt(2.0 / 64),
+                wd=self.weight_decay
+            )
+            b_fc = variable(
+                'biases',
+                [self.num_classes],
+                tf.constant_initializer(0.0)
+            )
+            logits = tf.matmul(gap, W_fc) + b_fc
 
-def resnet56():
-    return ResNet(BasicBlock, [9, 9, 9])
+        return logits
 
-def resnet110():
-    return ResNet(BasicBlock, [18, 18, 18])
-
-def resnet1202():
-    return ResNet(BasicBlock, [200, 200, 200])
-
-def test(net):
-    total_params = sum([tf.keras.backend.count_params(w) for w in net.trainable_weights])
-    print("Total number of params", total_params)
-    
-    # Count layers (conv + linear layers with weights)
-    num_layers = sum([1 for w in net.trainable_weights if len(w.shape) > 1])
-    print("Total layers", num_layers)
-
-def config():
-    return resnet20()
-
-# Example usage
-if __name__ == "__main__":
-    # Create model
-    model = resnet20()
-    
-    # Build model with sample input
-    model.build(input_shape=(None, 32, 32, 3))
-    
-    # Test with sample data
-    sample_input = tf.random.normal((1, 32, 32, 3))
-    output = model(sample_input)
-    print(f"Output shape: {output.shape}")
-    
-    # Test model summary and parameters
-    model.summary()
-    test(model)
+    def predictions(self, logits):
+        """Get predictions from logits."""
+        preds = tf.nn.softmax(logits, name='preds')
+        return preds
