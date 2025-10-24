@@ -10,7 +10,7 @@ import numpy as np
 import tensorflow as tf
 import math
 #adapted file given from TA to older tesnerflow version to avoid keras
-from influence.genericNeuralNet import GenericNeuralNet, variable, variable_with_weight_decay
+from influence.genericNeuralNet4Resnet20 import GenericNeuralNet, variable, variable_with_weight_decay
 from influence.dataset import DataSet
 
 

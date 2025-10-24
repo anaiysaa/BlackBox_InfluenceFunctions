@@ -15,7 +15,7 @@ from influence.resnet import ResNet20
 from load_cifar10 import load_small_cifar10, load_cifar10
 
 # WORKAROUND: Monkey-patch the get_vec_to_list_fn method to handle multi-dimensional arrays
-from influence.genericNeuralNet import GenericNeuralNet
+from influence.genericNeuralNet4Resnet20 import GenericNeuralNet
 
 original_get_vec_to_list_fn = GenericNeuralNet.get_vec_to_list_fn
 
@@ -24,7 +24,7 @@ def fixed_get_vec_to_list_fn(self):
     
     # Flatten all parameter arrays first, then concatenate
     flattened_params = [p.flatten() for p in params_val]
-    self.num_params = len(np.concatenate(flattened_params))
+    self.num_params = sum(p.size for p in params_val)
     print('Total number of parameters: %s' % self.num_params)
 
     def vec_to_list(v):
