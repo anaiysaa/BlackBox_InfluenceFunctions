@@ -65,7 +65,7 @@ actual_loss_diffs, predicted_loss_diffs, indices_to_remove = experiments.test_re
     model, 
     test_idx=test_idx, 
     iter_to_load=iter_to_load, 
-    num_to_remove=100,
+    num_to_remove=10,
     num_steps=30000, 
     remove_type='maxinf',
     force_refresh=True)

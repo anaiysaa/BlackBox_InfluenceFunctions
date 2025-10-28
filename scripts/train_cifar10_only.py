@@ -45,14 +45,14 @@ model = All_CNN_C(
     batch_size=batch_size,
     data_sets=data_sets,
     initial_learning_rate=initial_learning_rate,
-    damping=1e-2,
+    damping=0.1,              # increased from 1e-2
     decay_epochs=decay_epochs,
     mini_batch=True,
     train_dir='output', 
     log_dir='log',
     model_name='cifar10_small_all_cnn_c')
 
-num_steps = 50
+num_steps = 1000000
 model.train(
     num_steps=num_steps, 
     iter_to_switch_to_batch=10000000,
